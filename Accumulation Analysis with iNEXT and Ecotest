@@ -1,0 +1,124 @@
+#Accumulation curves analyses to compare the pattern of biodiversity monitoring performances of two hypothetic sampling method, starting with an abundance table
+#Let's start with producing nice accumulation curves with iNEXT (Hsieh, Ma & Chao, 2016)
+#load (and previously install, if needed) packages required for the analysis
+
+if (!require("iNEXT")) install.packages("iNEXT")
+if (!require("ggplot2")) install.packages("ggplot2")
+if (!require("dplyr")) install.packages("dplyr")
+library(iNEXT)
+library(ggplot2)
+library(dplyr)
+
+#set the directory where your abundance table is
+
+setwd("/Users/Pc/Desktop/")
+
+# load your table in the R environment as a comma separated value (.csv)
+
+data <- read.csv("iNEXT_12S.csv", header=TRUE, sep=";")
+
+#take a look at your dataset. In this example we have a matrix with 98 obs (raws) and 25 variables (columns). Raws represent species (or Operational Taxonomic Units), while columns represent samples (except the first one, where the species name are explicited).
+
+
+view(data)
+
+#let's assume that in this dataset we have 12 samples collected with a method named "filters" (samples from the second to the 12th column, included), and other 12 samples collected with another method called "Peds" (from the 13th to the 23rd column, indluded).
+
+# Let's separe the samples belonging to the two methods
+
+filters_data <- data[, 2:12]
+peds_data <- data[, 13:23]
+
+# And now, convert the subsets into abudances lists
+filters_abundance <- as.matrix(filters_data)
+peds_abundance <- as.matrix(peds_data)
+
+# Let's convert abundances matrices into binary matrices, with which we will perform accumulation curves
+filters_binary <- ifelse(filters_abundance > 0, 1, 0)
+peds_binary <- ifelse(peds_abundance > 0, 1, 0)
+
+# Now, let us create a list comprehending both methods
+inc_locations <- list(
+  Filters = filters_binary,
+  PEDS = peds_binary
+)
+
+# And, finally (!!) let's perform the accumulation analysis with iNEXT. Please be aware that "datatype", in this case should be "indicende raw", since we are analyzing presence/absence data. Q is the hill number, if 0 it will measure diversity on the numer of species (or taxonomic units). Knots represents the number of points used to generate curves, the more the smoother.  
+out.inc <- iNEXT(inc_locations, q = 0, datatype = "incidence_raw", endpoint = 150, knots = 1200)
+
+# Now, let's generate curves
+g <- ggiNEXT(out.inc, type = 1, color.var = "Assemblage") +
+  labs(y = "Number of species", x = "Number of samples") +
+  scale_x_continuous(limits = c(1, 35), breaks = 1:35) +  # Here choose the number of samples you want to be plotted. If you choose a number higher to the real number of samples you have you'll perform an extrapolation, i.e., predict the number of samples that with bring your data to saturation.
+  theme_classic() + 
+  ylim(0, 75)
+
+# Visualize the plot
+print(g)
+
+#In this example, we can see that both curves seem to reach the asintote at 35 samples, even if they show different slopes. This means that, even if both sampling design do not apparently have a satisfying number of replicates, the two methods may be comparable.
+#To be sure of that, we could perform a statistica analysis to assess if this two curves are more different each other than expected.
+#We will perform this analysis with ecotest (Cayuela et al., 2015)
+
+#let's start with the same initial table
+
+data <- read.csv("iNEXT_12S.csv", header = FALSE, sep=";") #data should already exist in your environment, but let's re-run it just to be sure
+
+#to run ecotest, we should modify the table
+#first of all, we need to transpose it
+
+data_transposed <- t(data)
+
+# Now, let's convert the output into a data frame
+
+data_transposed <- as.data.frame(data_transposed)
+
+
+colnames(data_transposed) <- data_transposed[1, ]
+
+
+# Let's remove the first raw and the first column
+
+data_transposed <- data_transposed[-1, -1]
+
+
+# Now, we need to create a column explaining the method relative to each sample. In this example the first 12 are "Filters", while the second 12 are "Peds".
+
+method_column <- c(rep("Filter", 12), rep("Peds", 12))
+
+# Let's add this column as the first of our transposed_data
+data_transposed <- cbind(method = method_column, data_transposed)
+
+# Let's visualize the table that we obtained
+print(data_transposed)
+
+#now we should trsnform our table to a presence/absence data
+
+library(dplyr)
+data_binary <- data_transposed %>%
+  mutate_if(is.numeric, ~ ifelse(. > 0, 1, 0))
+
+#let's load the rareNMtests package, which performs the ecotest
+
+library(rareNMtests)
+
+#and finally, let's performt he statistical test. Note that "by", should be the variable where you want your curves to be built and compared, in this case the first column, containing the method, i.e., "peds" or "filter".
+
+sbecoq0 <- EcoTest.sample(data_binary, by=data_binary[,1], MARGIN=1, method = "sample-size", niter = 1000)
+
+#let's plot the results
+
+plot(sbecoq0)
+
+
+Bibliography
+
+Hsieh, T. C., Ma, K., & Chao, A. (2016). iNEXT: an R package for rarefaction and extrapolation of species diversity (H ill numbers). Methods in ecology and evolution, 7(12), 1451-1456.
+
+Cayuela, L., Gotelli, N. J., & Colwell, R. K. (2015). Ecological and biogeographic null hypotheses for comparing rarefaction curves. Ecological Monographs, 85(3), 437-455.
+
+
+
+
+
+
