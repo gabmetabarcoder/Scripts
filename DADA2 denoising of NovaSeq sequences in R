@@ -1,0 +1,194 @@
+#
+##### install packages #####
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+BiocManager::install("dada2", force = TRUE)
+
+###### load packages #####
+library(dada2); packageVersion("dada2")
+library(digest)
+library(magrittr)
+library(dplyr)
+getN <- function(x) sum(getUniques(x))
+
+##### read data #####
+path<-"/Users/Pc/Desktop/sequenze_Ostana/Raw_data/" # path to raw reads
+path.out <- "/Users/Pc/Desktop/sequenze_Ostana/Raw_data/Output"
+path.rds <- "/Users/Pc/Desktop/sequenze_Ostana/Raw_data/RDS"
+
+
+list.files(path)
+# Forward and reverse fastq filenames have format: SAMPLENAME_R1_001.fastq and SAMPLENAME_R2_001.fastq
+fnFs <- sort(list.files(path, pattern="_R1_001.fastq", full.names = TRUE))
+fnFs
+fnRs <- sort(list.files(path, pattern="_R2_001.fastq", full.names = TRUE))
+# Extract sample names
+sample.names <- sapply(strsplit(basename(fnFs), "_"), `[`, 1)
+sample.names
+##### Quality profiles ####
+plotQualityProfile(fnFs[1:10])
+plotQualityProfile(fnRs[1:10])
+
+##### Filter/Trim #####
+FW_primerLength <- 26 #enter the number of nucleotides contained in forward primer
+RW_primerLength <- 26 #enter the number of nucleotides contained in reverse primer
+
+filtFs <- file.path(getwd(), "filtered", paste0(sample.names, "_F_filt.fastq.gz"))
+filtRs <- file.path(getwd(), "filtered", paste0(sample.names, "_R_filt.fastq.gz"))
+names(filtFs) <- sample.names
+names(filtRs) <- sample.names
+out <- filterAndTrim(fnFs, filtFs, fnRs, filtRs, truncLen=c(160,160),
+                     maxN=0, maxEE=c(2,2), truncQ=2, rm.phix=TRUE, 
+                     compress=TRUE, multithread=TRUE, verbose = TRUE)  #trunclen is the nucleotidic lenght retained after visualizing quality plots. In this case, with a 250bp paired end sequencing, we selected to cut 90 bp, as a quality drop has been observed after 160 bp length of reads.
+saveRDS(out,file.path(path.rds, "FilTrim.rds"))
+
+
+##### Error rates - Option_4 - Alter loess function arguments (weights, span, and degree) also enforce monotonicity. #####
+
+loessErrfun_mod4 <- function(trans) {
+  qq <- as.numeric(colnames(trans))
+  est <- matrix(0, nrow=0, ncol=length(qq))
+  for(nti in c("A","C","G","T")) {
+    for(ntj in c("A","C","G","T")) {
+      if(nti != ntj) {
+        errs <- trans[paste0(nti,"2",ntj),]
+        tot <- colSums(trans[paste0(nti,"2",c("A","C","G","T")),])
+        rlogp <- log10((errs+1)/tot)  # 1 psuedocount for each err, but if tot=0 will give NA
+        rlogp[is.infinite(rlogp)] <- NA
+        df <- data.frame(q=qq, errs=errs, tot=tot, rlogp=rlogp)
+        
+        # original
+        # ###! mod.lo <- loess(rlogp ~ q, df, weights=errs) ###!
+        # mod.lo <- loess(rlogp ~ q, df, weights=tot) ###!
+        # #        mod.lo <- loess(rlogp ~ q, df)
+        
+        # jonalim's solution
+        # https://github.com/benjjneb/dada2/issues/938
+        mod.lo <- loess(rlogp ~ q, df, weights = log10(tot),degree = 1, span = 0.95)
+        
+        pred <- predict(mod.lo, qq)
+        maxrli <- max(which(!is.na(pred)))
+        minrli <- min(which(!is.na(pred)))
+        pred[seq_along(pred)>maxrli] <- pred[[maxrli]]
+        pred[seq_along(pred)<minrli] <- pred[[minrli]]
+        est <- rbind(est, 10^pred)
+      } # if(nti != ntj)
+    } # for(ntj in c("A","C","G","T"))
+  } # for(nti in c("A","C","G","T"))
+  
+  # HACKY
+  MAX_ERROR_RATE <- 0.25
+  MIN_ERROR_RATE <- 1e-7
+  est[est>MAX_ERROR_RATE] <- MAX_ERROR_RATE
+  est[est<MIN_ERROR_RATE] <- MIN_ERROR_RATE
+  
+  # enforce monotonicity
+  # https://github.com/benjjneb/dada2/issues/791
+  estorig <- est
+  est <- est %>%
+    data.frame() %>%
+    mutate_all(funs(case_when(. < X40 ~ X40,
+                              . >= X40 ~ .))) %>% as.matrix()
+  rownames(est) <- rownames(estorig)
+  colnames(est) <- colnames(estorig)
+  
+  # Expand the err matrix with the self-transition probs
+  err <- rbind(1-colSums(est[1:3,]), est[1:3,],
+               est[4,], 1-colSums(est[4:6,]), est[5:6,],
+               est[7:8,], 1-colSums(est[7:9,]), est[9,],
+               est[10:12,], 1-colSums(est[10:12,]))
+  rownames(err) <- paste0(rep(c("A","C","G","T"), each=4), "2", c("A","C","G","T"))
+  colnames(err) <- colnames(trans)
+  # Return
+  return(err)
+}
+
+errF_4 <- learnErrors(
+  filtFs,
+  multithread = TRUE,
+  nbases = 1e10,
+  errorEstimationFunction = loessErrfun_mod4,
+  verbose = TRUE,
+  MAX_CONSIST = 50
+)
+errR_4 <- learnErrors(
+  filtRs,
+  multithread = TRUE,
+  nbases = 1e10,
+  errorEstimationFunction = loessErrfun_mod4,
+  verbose = TRUE,
+  MAX_CONSIST = 50
+)
+
+??checkConvergence
+
+saveRDS(errF_4,file.path(path.rds, "errF_4.rds"))
+errF_4<-readRDS(file.path(path.rds, "errF_4.rds"))
+pdf(file.path(path.out,"errF_4-Plot.pdf")) 
+plotErrors(errF_4, nominalQ=TRUE)
+dev.off()
+
+saveRDS(errR_4,file.path(path.rds, "errR_4.rds"))
+errR_4<-readRDS(file.path(path.rds, "errR_4.rds"))
+pdf(file.path(path.out,"errR_4-Plot.pdf")) 
+plotErrors(errR_4, nominalQ=TRUE)
+dev.off()
+
+
+##### Sample Inference #####
+errF_corr<-errF_4
+errR_corr<-errR_4
+
+dadaFs_corr <- dada(filtFs, err=errF_corr, multithread=TRUE)
+saveRDS(dadaFs_corr,file.path(path.rds, "dada_F.rds"))
+dadaFs_corr<-readRDS(file.path(path.rds, "dada_F.rds"))
+dadaRs_corr <- dada(filtRs, err=errR_corr, multithread=TRUE)
+saveRDS(dadaRs_corr,file.path(path.rds, "dada_R.rds"))
+dadaRs_corr<-readRDS(file.path(path.rds, "dada_R.rds"))
+
+##### merge reads #####
+mergers_corr <- mergePairs(dadaFs_corr, filtFs, dadaRs_corr, filtRs, verbose=TRUE)
+saveRDS(mergers_corr,file.path(path.rds, "dada_merged.rds"))
+mergers_corr<-readRDS(file.path(path.rds, "dada_merged.rds"))
+# make table and check sequence length
+seqtab_corr <- makeSequenceTable(mergers_corr)
+plot(table(nchar(getSequences(seqtab_corr))))
+table(nchar(getSequences(seqtab_corr)))
+length <- write.csv(table(nchar(getSequences(seqtab_corr))), file = "lunghezza_reads.csv")
+seqtab_corr <- seqtab_corr[,nchar(colnames(seqtab_corr)) %in% 340:400] # remove too long/short sequences
+saveRDS(seqtab_corr,file.path(path.rds, "dada_tab-with-chimeras.rds"))
+seqtab_corr<-readRDS(file.path(path.rds, "dada_tab-with-chimeras.rds"))
+
+##### remove chimeras #####
+seqtab_corr.nochim <- removeBimeraDenovo(seqtab_corr, method="consensus", multithread=TRUE, verbose=TRUE)
+sum(seqtab_corr.nochim)/sum(seqtab_corr)
+saveRDS(seqtab_corr.nochim,file.path(path.rds, "dada_tab.rds"))
+seqtab_corr.nochim<-readRDS(file.path(path.rds, "dada_tab.rds"))
+
+
+##### summarize ####
+track_corr <- cbind(out, sapply(dadaFs_corr, getN), sapply(dadaRs_corr, getN), sapply(mergers_corr, getN), rowSums(seqtab_corr.nochim))
+colnames(track_corr) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nonchim")
+rownames(track_corr) <- sample.names
+write.table(track_corr,file.path(path.out, "dada_DenoisingStats.tsv"), sep="\t", row.names=TRUE, col.names=TRUE, quote=FALSE)
+
+# Export
+write.table(t(seqtab_corr.nochim),file.path(path.out,"dada_seqtab.tsv"), sep="\t", row.names=TRUE, col.names=NA, quote=FALSE)
+
+seqtab_corr.nochim.ash <- seqtab_corr.nochim
+colnames(seqtab_corr.nochim.ash) <- sapply(colnames(seqtab_corr.nochim), digest, algo="md5")
+write.table(t(seqtab_corr.nochim.ash),file.path(path.out,"dada_ashtab.tsv"), sep="\t", row.names=TRUE, col.names=NA, quote=FALSE)
+
+rseq_corr <- data.frame(ID=colnames(seqtab_corr.nochim.ash),SEQ=colnames(seqtab_corr.nochim))
+write.table(rseq_corr,file.path(path.out,"dada_rep-seqs.tsv"), sep="\t", row.names=FALSE, quote=FALSE)
+
+X <- rseq_corr
+Xfasta <- character(nrow(X) * 2)
+Xfasta[c(TRUE, FALSE)] <- paste0(">", X$ID)
+Xfasta[c(FALSE, TRUE)] <- X$SEQ
+writeLines(Xfasta, file.path(path.out,"dada_rep-seqs.fasta"))
+
+
+#
+
+
